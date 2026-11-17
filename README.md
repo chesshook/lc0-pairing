@@ -7,9 +7,9 @@ GitHub stores only small source files and the public discovery pointer. It does 
 ## Files in this repository
 
 - `bootstrap_cache.py` — first-time clean-start build: installs build tools, clones LC0 v0.32.1 with its required submodule, compiles the CUDA backend for T4 compute capability 7.5, downloads and verifies BT4-it332, downloads cloudflared, smoke-tests the dual-GPU UCI engine, and writes the cache to `/kaggle/working/lc0-dual-t4-cache`.
-- `cache_builder_cell.py` — short, SHA256-pinned one-cell launcher for the Builder notebook.
+- `cache_builder_cell.py` — short, Git-blob-SHA1-verified one-cell launcher for the Builder notebook.
 - `lc0_kaggle_server.py` — persistent UCI/HTTP service that consumes the saved cache, starts one LC0 process, exposes a bounded authenticated JSON analysis API, launches a Cloudflare Quick Tunnel, and updates `hooker.txt`.
-- `kaggle_final_cell.py` — SHA256-pinned one-cell launcher for the Server notebook.
+- `kaggle_final_cell.py` — Git-blob-SHA1-verified one-cell launcher for the Server notebook.
 - `hooker.txt` — public discovery pointer. Starts at `OFFLINE`, then contains the currently active Quick Tunnel URL.
 - `requirements.txt` — Python dependency pin.
 - `cache_export.py` — optional legacy exporter for a session that already has the previously compiled LC0 and weights at the old validation paths. **Do not use this for a clean Kaggle runtime.**
@@ -35,7 +35,7 @@ Kaggle supports reusing notebook output files through **Input → Add Input → 
 3. Open **Input → Add Input → Notebook Output Files**, search for `LC0 Dual T4 - Cache Builder`, select its saved output version, and add it. Pin to latest only if you expect to intentionally publish updated cache versions later; otherwise the fixed saved version is fine.
 4. In **Add-ons → Secrets**, create the five Secrets below and enable each for this Server notebook.
 5. Add one Code cell, paste the complete content of `kaggle_final_cell.py`, and run it.
-6. The cell fetches only the small SHA256-pinned server source file from this repository, validates it, installs `python-chess` only if needed, then starts the service.
+6. The cell fetches only the small server source file and verifies its Git blob SHA1 from this repository, validates it, installs `python-chess` only if needed, then starts the service.
 7. Wait for `LC0 DUAL-T4 SERVICE ONLINE`. Confirm the printed base URL and `/health` URL. The GitHub `hooker.txt` file should then be updated from `OFFLINE` to the new Quick Tunnel URL.
 8. Keep this cell running while using the service. Interrupt it to request cleanup and publish `OFFLINE`.
 
