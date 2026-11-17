@@ -38,7 +38,7 @@ SERVER_URL = (
 )
 
 # Exact GitHub Contents API blob SHA for lc0_kaggle_server.py.
-EXPECTED_SERVER_BLOB_SHA1 = "47972a2ac05c5aaf7185e044c1ce0e79f2b84cf4"
+EXPECTED_SERVER_BLOB_SHA1 = "789892c3d4115d8a5fae0425e8a07727eee2f0bf"
 
 SERVER_PATH = Path("/kaggle/working/lc0_kaggle_server.py")
 TEMP_PATH = SERVER_PATH.with_suffix(".download")
