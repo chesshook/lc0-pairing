@@ -44,7 +44,13 @@ SOURCE_ROOT = WORK / "lc0_dual_t4_lab"
 OUTPUT_ROOT = WORK / "lc0-dual-t4-cache"
 
 
-def run(command: list[str], *, cwd: Path | None = None, env=None) -> subprocess.CompletedProcess[str]:
+def run(
+    command: list[str],
+    *,
+    cwd: Path | None = None,
+    env=None,
+    capture: bool = False,
+) -> subprocess.CompletedProcess[str]:
     print("\n$", " ".join(str(x) for x in command), flush=True)
     return subprocess.run(
         [str(x) for x in command],
@@ -52,6 +58,7 @@ def run(command: list[str], *, cwd: Path | None = None, env=None) -> subprocess.
         env=env,
         text=True,
         check=True,
+        capture_output=capture,
     )
 
 
@@ -132,7 +139,7 @@ def download_cloudflared(destination: Path) -> str:
 def verify_hardware_and_cuda() -> tuple[list[str], str]:
     gpu = run([
         "nvidia-smi", "--query-gpu=name", "--format=csv,noheader"
-    ]).stdout
+    ], capture=True).stdout
     gpu_names = [line.strip() for line in gpu.splitlines() if line.strip()]
     if len(gpu_names) != 2 or not all("T4" in name.upper() for name in gpu_names):
         raise RuntimeError(
@@ -149,7 +156,7 @@ def verify_hardware_and_cuda() -> tuple[list[str], str]:
             "nvcc is not available. Confirm GPU T4 x2 is selected and the Kaggle "
             "GPU runtime has initialized. LC0's native CUDA backend requires nvcc."
         )
-    nvcc_version = run([nvcc, "--version"]).stdout
+    nvcc_version = run([nvcc, "--version"], capture=True).stdout
     print("CUDA compiler:", nvcc)
     print(nvcc_version)
     run(["g++", "--version"])
@@ -281,7 +288,7 @@ def smoke_test_dual(binary: Path, weights: Path, gpu_names: list[str]) -> dict:
         "nvidia-smi",
         "--query-gpu=index,name,memory.used",
         "--format=csv,noheader",
-    ]).stdout
+    ], capture=True).stdout
     return {
         "engine_id": "Lc0 v0.32.1",
         "gpu_names": gpu_names,
