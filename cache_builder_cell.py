@@ -24,7 +24,7 @@ BUILDER_URL = (
     "https://raw.githubusercontent.com/chesshook/lc0-pairing/"
     "main/bootstrap_cache.py"
 )
-BUILDER_SHA256 = "cead1f605fd42a4f666079d26969b5b50c51f13d48e405739d60462757df1e4f"
+BUILDER_SHA256 = "cc21d09fb3224ca21aaa10df277ce7814e1ef0b5c9eafe21dff5da7815dbf765"
 
 BUILDER = Path("/kaggle/working/bootstrap_cache.py")
 TEMP = BUILDER.with_suffix(".download")
