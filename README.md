@@ -1,10 +1,10 @@
 # LC0 Dual-T4 Kaggle Pairing
 
-This repository contains a Kaggle-hosted LC0 service and a small GitHub endpoint-discovery pointer for the later ChessHook Android integration.
+This repository prepares a Kaggle-hosted LC0 service for the later ChessHook Android integration. GitHub stores only the public discovery pointer and small Python source files. It does **not** store the neural-network weights or compiled engine binary.
 
 ## Validated engine configuration
 
-The supplied validation log reports 24/24 checks passed, two Tesla T4 GPUs participating, 12 legal requests through one persistent UCI process, and a 2.510x dual-T4/single-T4 throughput ratio in that test run. This is a measured smoke-test result, not a universal speed guarantee.
+The supplied validation log reports 24/24 checks passed, both Tesla T4 GPUs participating, 12 consecutive legal-position requests through one persistent UCI process, and a 2.510x dual-T4/single-T4 throughput ratio in that test run. This is a benchmark observation, not a universal speed guarantee.
 
 - LC0 v0.32.1
 - BT4-it332 network, 382,645,315 bytes
@@ -13,40 +13,55 @@ The supplied validation log reports 24/24 checks passed, two Tesla T4 GPUs parti
 - `--backend-opts=backend=cuda-fp16,(gpu=0),(gpu=1)`
 - 4 CPU threads, minibatch 256, NN cache 1,000,000
 
-## Repository contents
+## Files
 
-- `lc0_kaggle_pairing_setup.zip` — complete importable setup bundle (source, notebook, cache exporter, final bootstrap cell, requirements, and detailed instructions).
-- `hooker.txt` — public discovery pointer only. Starts as `OFFLINE`; the Kaggle server replaces it with the active Quick Tunnel URL.
+- `cache_export.py` — one-time exporter for the already-compiled LC0 executable, BT4 network and `cloudflared` binary.
+- `lc0_kaggle_server.py` — persistent UCI/HTTP server. It validates the attached cache, starts one LC0 process, serves a bounded authenticated JSON analysis API, runs a Cloudflare Quick Tunnel, and updates `hooker.txt`.
+- `kaggle_final_cell.py` — the single Kaggle cell to copy into a new notebook.
+- `hooker.txt` — public discovery pointer. Initially `OFFLINE`; the service replaces it with the active Quick Tunnel URL.
 
-The GitHub repository stores no neural-network weights, engine executable, or API secret. The large immutable artifacts belong in Kaggle Notebook Output Files.
+## One-time cache export (do this before the original validated Kaggle runtime disappears)
 
-## One-time setup
+The earlier validation notes identify the existing artifacts under:
 
-1. Create a fine-grained GitHub token restricted to this repository with **Contents: Read and write** and Metadata: Read-only. Store it only in Kaggle Secrets as `GITHUB_TOKEN`.
-2. In the existing validated Kaggle notebook, download this repository's setup ZIP and extract it. Run `lc0_kaggle_setup/cache_export.py` against the existing build. Do not rebuild LC0. The exporter checks the exact BT4 size and SHA256, copies the compiled binary, and downloads `cloudflared` once.
-3. Save a Kaggle notebook version containing the `lc0-dual-t4-cache` output folder. Attach that notebook's Output Files as an Input to the new server notebook.
-4. Configure Kaggle **GPU T4 x2**, Internet **On**, and the five Secrets below.
-5. Import `lc0_dual_t4_server.ipynb` from the ZIP and execute its single code cell. Alternatively, paste `kaggle_final_cell.py` into a blank Kaggle notebook.
+```
+/kaggle/working/lc0_dual_t4_lab/lc0/build/release/lc0
+/kaggle/working/lc0_dual_t4_lab/BT4-it332.pb.gz
+```
+
+In that same Kaggle session, execute:
+
+```python
+!wget -q https://raw.githubusercontent.com/chesshook/lc0-pairing/main/cache_export.py \
+    -O /kaggle/working/cache_export.py
+!python /kaggle/working/cache_export.py
+```
+
+The exporter verifies the BT4 size and SHA256, copies the existing LC0 executable and network into `/kaggle/working/lc0-dual-t4-cache`, and downloads the small Cloudflare tunnel client once. It does **not** compile LC0.
+
+Confirm `CACHE EXPORT COMPLETE`, then save a new version of that notebook so `lc0-dual-t4-cache` appears in its Output Files. Attach those Output Files as an Input to the new server notebook. This is the key persistence step: the later runtimes reuse these output artifacts instead of redownloading weights or rebuilding.
+
+## Kaggle server notebook
+
+1. Create/import a Kaggle notebook.
+2. Set Accelerator to **GPU T4 x2** and Internet to **On**.
+3. Add Input -> Notebook Output Files -> choose the saved cache-export notebook.
+4. Add and enable the Kaggle Secrets below.
+5. Copy the complete source of `kaggle_final_cell.py` from this repository into one code cell and run it.
 
 ### Kaggle Secrets
 
 | Secret | Value |
 |---|---|
-| `GITHUB_TOKEN` | Fine-grained token described above |
+| `GITHUB_TOKEN` | Fine-grained GitHub token restricted to this repository, Contents: Read and write; Metadata: Read-only |
 | `GITHUB_REPO_OWNER` | `chesshook` |
 | `GITHUB_REPO_NAME` | `lc0-pairing` |
 | `GITHUB_BRANCH` | `main` |
-| `ENGINE_API_TOKEN` | Independently generated random bearer token; never commit it |
+| `ENGINE_API_TOKEN` | A separate random bearer token; keep it private |
 
-Generate `ENGINE_API_TOKEN` locally with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Keep it in Kaggle Secrets and your password manager. Do not paste it into chat, source code, or GitHub.
+Generate `ENGINE_API_TOKEN` locally with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Store it in Kaggle Secrets and your password manager. Never commit it or paste it into the chat.
 
-## Runtime behavior
-
-At each fresh Kaggle runtime, the single cell downloads only this small source bundle, finds and verifies the mounted notebook-output cache under `/kaggle/input`, copies the small executable tools into session scratch (to restore execute permissions), and reuses the 383 MB weights file directly from the read-only mounted input. It does not download weights or compile LC0.
-
-LC0 must still initialize CUDA and load BT4 into GPU memory after a full runtime restart. That cannot be persisted across Kaggle sessions.
-
-The service starts one long-lived UCI process, warms it with a legal-move smoke test, exposes the local API on port 8765, starts a Cloudflare Quick Tunnel, and publishes the new base URL into `hooker.txt`. Interrupting the notebook cell requests graceful shutdown and attempts to publish `OFFLINE`.
+The GitHub token must be fine-grained and limited to this repository. The server uses it solely to create/update the root `hooker.txt` file. It retrieves the file's current SHA before each update.
 
 ## API contract
 
@@ -54,14 +69,23 @@ Discovery URL:
 
 `https://raw.githubusercontent.com/chesshook/lc0-pairing/main/hooker.txt`
 
-- `GET /health` — public readiness/version/GPU report.
+- `GET /health` — public readiness, LC0 version and GPU names.
 - `POST /v1/analyze` — authenticated FEN analysis.
 - Header: `Authorization: Bearer <ENGINE_API_TOKEN>`.
 - JSON request: `{"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","movetime_ms":1800}`.
-- Response includes UCI and SAN best move, PV, score, depth, nodes, NPS, and elapsed time.
 
-The endpoint accepts bounded FEN/time inputs only; it does not expose arbitrary UCI commands or shell execution. Analysis requests are serialized; overlapping calls receive HTTP 429 rather than queueing stale positions.
+The response includes UCI/SAN best move, PV, score, depth, nodes, NPS and elapsed time. The service accepts bounded FEN/time input and does not expose arbitrary UCI commands or shell execution. Overlapping analyses receive HTTP 429 rather than building a stale request queue.
 
-## Important limitations
+## Restart behavior and limitations
 
-Kaggle GPU sessions are finite and may be interrupted; this is a development/CTF backend, not an always-on server. Cloudflare Quick Tunnels are testing infrastructure with changing hostnames and no uptime guarantee. The phone must read `hooker.txt`, validate `/health`, and handle `OFFLINE`, stale URLs, timeouts, and 429 responses.
+| Component | Stored/handled how |
+|---|---|
+| LC0 executable, BT4, cloudflared | Saved Kaggle Notebook Output Files attached as Input |
+| Python server source | Small file fetched from this public repository |
+| GitHub PAT and engine API token | Kaggle Secrets only |
+| LC0 process and GPU network memory | Reinitialized after each runtime restart |
+| Quick Tunnel hostname | Regenerated and republished to `hooker.txt` each start |
+
+A fresh Kaggle runtime downloads only the small Python server source. It copies the cached executable tools into writable session storage, uses the BT4 network directly from the read-only mounted output, and does not rebuild LC0 or download the network again. LC0 must still load BT4 into GPU memory after a restart.
+
+Kaggle GPU sessions are finite and may be interrupted. Cloudflare Quick Tunnels are testing infrastructure: hostnames change and there is no uptime guarantee. The phone must treat `hooker.txt` as a discovery hint, validate `/health`, and handle `OFFLINE`, stale endpoints, timeouts and HTTP 429.
