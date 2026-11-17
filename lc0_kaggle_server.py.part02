@@ -103,4 +103,4 @@ def make_handler(api: Lc0Api):
             print("[http] " + (fmt % args), flush=True)
 
         def send_json(self, status: int, payload: dict[str, Any]) -> None:
-            body = json.dumps(payload, separators=(",",
+            body = json.dumps(payload, separators=(","
