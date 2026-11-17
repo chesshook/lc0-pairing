@@ -301,10 +301,13 @@ def make_handler(api: Lc0Api):
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
-            self.send_header("Connection", "close")
+            # Keep HTTP/1.1 alive so the Android client can reuse its TLS/origin
+            # connection for successive small FEN requests. Content-Length frames
+            # each response, and BaseHTTPRequestHandler will read the next request.
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Keep-Alive", "timeout=30, max=100")
             self.end_headers()
             self.wfile.write(body)
-            self.close_connection = True
 
         def do_GET(self) -> None:
             if self.path == "/health":
