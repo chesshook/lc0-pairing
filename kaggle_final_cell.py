@@ -12,13 +12,13 @@
 #       GITHUB_BRANCH
 #       ENGINE_API_TOKEN
 #
-# Downloads only this small Python service source.
+# Downloads only this small, SHA256-pinned Python service source.
 # Never downloads BT4 weights or compiles LC0 at startup.
 # ============================================================
 
 from pathlib import Path
-import importlib.util
 import hashlib
+import importlib.util
 import runpy
 import shutil
 import subprocess
@@ -36,6 +36,7 @@ SERVER_URL = (
     + REPO_OWNER + "/" + REPO_NAME + "/" + BRANCH
     + "/lc0_kaggle_server.py"
 )
+SERVER_SHA256 = "b566d20c2e5ddfa020dcc573f4b378cf7072d694c89a00dbcd55b1f8a93a1a33"
 SERVER_PATH = Path("/kaggle/working/lc0_kaggle_server.py")
 TEMP_PATH = SERVER_PATH.with_suffix(".download")
 
@@ -48,15 +49,14 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-# Confirm that credentials are present without printing or exposing values.
+# Confirm all secrets are attached without printing their values.
 secrets = UserSecretsClient()
-required_secrets = (
+for name in (
     "GITHUB_TOKEN",
     "GITHUB_REPO_OWNER",
     "GITHUB_REPO_NAME",
     "ENGINE_API_TOKEN",
-)
-for name in required_secrets:
+):
     value = secrets.get_secret(name)
     if value is None or not str(value).strip():
         raise RuntimeError(
@@ -64,15 +64,8 @@ for name in required_secrets:
             "and enable it for this notebook."
         )
 
-# Reuse this small file if it is already present in the current runtime.
-# A new Kaggle runtime downloads only ~20 KB of source code.
-source_is_ready = False
-if SERVER_PATH.is_file():
-    source_is_ready = (
-        SERVER_PATH.stat().st_size == 20235
-    )
-
-if not source_is_ready:
+# Reuse the cached small source file only if it matches the pinned SHA256.
+if not SERVER_PATH.is_file() or sha256_file(SERVER_PATH) != SERVER_SHA256:
     request = urllib.request.Request(
         SERVER_URL,
         headers={"User-Agent": "lc0-kaggle-bootstrap/1.0"},
@@ -81,12 +74,13 @@ if not source_is_ready:
         shutil.copyfileobj(response, out)
     TEMP_PATH.replace(SERVER_PATH)
 
-if SERVER_PATH.stat().st_size != 20235:
-    raise RuntimeError(
-        "Unexpected server source size. Check the public GitHub source file."
-    )
+if sha256_file(SERVER_PATH) != SERVER_SHA256:
+    raise RuntimeError("LC0 server source SHA256 mismatch; refusing to execute it.")
 
-# Import python-chess only if this Kaggle environment does not already have it.
+# Validate Python syntax before starting any engine process.
+source = SERVER_PATH.read_text(encoding="utf-8")
+compile(source, str(SERVER_PATH), "exec")
+
 if importlib.util.find_spec("chess") is None:
     print("Installing python-chess (small Python dependency only)...", flush=True)
     subprocess.run(
@@ -94,11 +88,10 @@ if importlib.util.find_spec("chess") is None:
         check=True,
     )
 
-print("LC0 server source ready:", SERVER_PATH)
-print("Using saved Kaggle Output cache; no LC0 build or BT4 download.")
+print("LC0 server source verified:", SERVER_SHA256)
+print("Using attached Kaggle Output cache; no LC0 build or BT4 download.")
 print("Starting one persistent dual-T4 UCI process in this notebook cell.")
 print("Keep this cell running. Interrupt it to request graceful shutdown.\n", flush=True)
 
-# IMPORTANT: run in-process so KeyboardInterrupt triggers the service's
-# finally block, which stops the tunnel, HTTP server and LC0 engine.
+# Run in-process so KeyboardInterrupt reaches the service cleanup block.
 runpy.run_path(str(SERVER_PATH), run_name="__main__")
