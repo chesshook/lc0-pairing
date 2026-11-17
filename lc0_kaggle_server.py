@@ -92,7 +92,8 @@ def find_cache() -> tuple[Path, dict[str, Any]]:
     raise RuntimeError(
         "No matching LC0 cache found in /kaggle/input. Attach the notebook output "
         "containing lc0, BT4-it332.pb.gz, cloudflared and manifest.json. "
-        "Do not run the build again; use cache_export.py once in the validated notebook."
+        "Run bootstrap_cache.py once in the separate Builder notebook, save its Output Files, "
+        "and attach that saved output as an Input to this Server notebook."
     )
 
 
