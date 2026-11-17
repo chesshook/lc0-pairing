@@ -1,17 +1,11 @@
 # ============================================================
 # LC0 DUAL-T4 — ONE-TIME CLEAN BUILD + CACHE EXPORT
 #
-# Use this in the FIRST Kaggle notebook. This is the step you
-# have NOT done yet: it downloads and compiles LC0, downloads
-# BT4 once, tests the dual-T4 UCI engine, and creates
-# /kaggle/working/lc0-dual-t4-cache for persistent Notebook Output.
+# FIRST KAGGLE NOTEBOOK
 #
-# Settings required BEFORE running:
-#   1. Accelerator = GPU T4 x2
-#   2. Internet = ON
-#   3. No Kaggle Secrets are required for this builder.
-#
-# Run this cell only once for the initial cache build.
+# This downloads the build script only, verifies it against the
+# GitHub Git-blob SHA1, then executes it. The BT4 network itself
+# is separately verified by SHA256 inside bootstrap_cache.py.
 # ============================================================
 
 from pathlib import Path
@@ -24,21 +18,24 @@ BUILDER_URL = (
     "https://raw.githubusercontent.com/chesshook/lc0-pairing/"
     "main/bootstrap_cache.py"
 )
-BUILDER_SHA256 = "0be1e0306c9b3a0e9cca6a78e1e1b19fa46cbd1fa6017ad347535e9814d45859"
+
+# Exact GitHub Contents API blob SHA for bootstrap_cache.py.
+EXPECTED_BUILDER_BLOB_SHA1 = "c0ec45cc9600648171e9746fef17606190406159"
 
 BUILDER = Path("/kaggle/working/bootstrap_cache.py")
 TEMP = BUILDER.with_suffix(".download")
 
 
-def sha256_file(path):
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def git_blob_sha1(path):
+    data = path.read_bytes()
+    header = f"blob {len(data)}\0".encode("ascii")
+    return hashlib.sha1(header + data).hexdigest()
 
 
-if not BUILDER.is_file() or sha256_file(BUILDER) != BUILDER_SHA256:
+if (
+    not BUILDER.is_file()
+    or git_blob_sha1(BUILDER) != EXPECTED_BUILDER_BLOB_SHA1
+):
     request = urllib.request.Request(
         BUILDER_URL,
         headers={"User-Agent": "lc0-kaggle-cache-builder/1.0"},
@@ -47,13 +44,20 @@ if not BUILDER.is_file() or sha256_file(BUILDER) != BUILDER_SHA256:
         shutil.copyfileobj(response, out)
     TEMP.replace(BUILDER)
 
-if sha256_file(BUILDER) != BUILDER_SHA256:
-    raise RuntimeError("Builder SHA256 mismatch; refusing to execute.")
+
+actual_blob_sha1 = git_blob_sha1(BUILDER)
+
+if actual_blob_sha1 != EXPECTED_BUILDER_BLOB_SHA1:
+    raise RuntimeError(
+        "Builder Git blob SHA1 mismatch. "
+        f"Expected {EXPECTED_BUILDER_BLOB_SHA1}, got {actual_blob_sha1}. "
+        "No build was started."
+    )
 
 source = BUILDER.read_text(encoding="utf-8")
 compile(source, str(BUILDER), "exec")
 
-print("Verified clean-start builder:", BUILDER_SHA256)
+print("Verified builder Git blob SHA1:", actual_blob_sha1)
 print("Starting one-time LC0 v0.32.1 + CUDA build and BT4 cache export.")
 print("Do not interrupt the cell during the build/download/smoke test.")
 print("The script creates /kaggle/working/lc0-dual-t4-cache.\n", flush=True)
