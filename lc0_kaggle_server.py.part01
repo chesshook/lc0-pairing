@@ -84,4 +84,4 @@ class GitHubPointer:
                 print("GitHub pointer updated:", value if value == "OFFLINE" else "ONLINE (URL stored)", flush=True)
                 return
             except RuntimeError as exc:
-                # A concurrent update may invalidate the Contents API SHA; refresh it and retry.
+                # A concur
