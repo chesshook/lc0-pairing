@@ -86,8 +86,27 @@ def download_verified(url: str, destination: Path, expected_size: int, expected_
         headers={"User-Agent": "lc0-kaggle-cache-builder/1.0"},
     )
     print(f"Downloading {destination.name} ...", flush=True)
-    with urllib.request.urlopen(request, timeout=120) as response, temporary.open("wb") as out:
-        shutil.copyfileobj(response, out, length=8 * 1024 * 1024)
+    with urllib.request.urlopen(request, timeout=120) as response:
+        total = int(response.headers.get("Content-Length") or 0)
+        downloaded = 0
+        last_report = 0
+        with temporary.open("wb") as out:
+            while True:
+                chunk = response.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                downloaded += len(chunk)
+                if downloaded - last_report >= 32 * 1024 * 1024 or (total and downloaded == total):
+                    if total:
+                        percent = 100.0 * downloaded / total
+                        print(
+                            f"  Download progress: {downloaded:,}/{total:,} bytes ({percent:.1f}%)",
+                            flush=True,
+                        )
+                    else:
+                        print(f"  Downloaded: {downloaded:,} bytes", flush=True)
+                    last_report = downloaded
 
     actual_size = temporary.stat().st_size
     actual_sha = sha256_file(temporary)
@@ -141,6 +160,7 @@ def verify_hardware_and_cuda() -> tuple[list[str], str]:
         "nvidia-smi", "--query-gpu=name", "--format=csv,noheader"
     ], capture=True).stdout
     gpu_names = [line.strip() for line in gpu.splitlines() if line.strip()]
+    print("Detected GPUs:", gpu_names, flush=True)
     if len(gpu_names) != 2 or not all("T4" in name.upper() for name in gpu_names):
         raise RuntimeError(
             "This builder requires Kaggle GPU T4 x2. Found: " + repr(gpu_names)
