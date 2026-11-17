@@ -36,7 +36,7 @@ SERVER_URL = (
     + REPO_OWNER + "/" + REPO_NAME + "/" + BRANCH
     + "/lc0_kaggle_server.py"
 )
-SERVER_SHA256 = "b566d20c2e5ddfa020dcc573f4b378cf7072d694c89a00dbcd55b1f8a93a1a33"
+SERVER_SHA256 = "bde154ecda7061f6d9a16dce548153e7fdc21ed5112057610cb7aa907e05cad7"
 SERVER_PATH = Path("/kaggle/working/lc0_kaggle_server.py")
 TEMP_PATH = SERVER_PATH.with_suffix(".download")
 
