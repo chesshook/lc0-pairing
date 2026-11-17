@@ -12,7 +12,7 @@
 #       GITHUB_BRANCH
 #       ENGINE_API_TOKEN
 #
-# Downloads only this small, SHA256-pinned Python service source.
+# Downloads only the small server Python source.
 # Never downloads BT4 weights or compiles LC0 at startup.
 # ============================================================
 
@@ -36,21 +36,23 @@ SERVER_URL = (
     + REPO_OWNER + "/" + REPO_NAME + "/" + BRANCH
     + "/lc0_kaggle_server.py"
 )
-SERVER_SHA256 = "bde154ecda7061f6d9a16dce548153e7fdc21ed5112057610cb7aa907e05cad7"
+
+# Exact GitHub Contents API blob SHA for lc0_kaggle_server.py.
+EXPECTED_SERVER_BLOB_SHA1 = "47972a2ac05c5aaf7185e044c1ce0e79f2b84cf4"
+
 SERVER_PATH = Path("/kaggle/working/lc0_kaggle_server.py")
 TEMP_PATH = SERVER_PATH.with_suffix(".download")
 
 
-def sha256_file(path):
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def git_blob_sha1(path):
+    data = path.read_bytes()
+    header = f"blob {len(data)}\0".encode("ascii")
+    return hashlib.sha1(header + data).hexdigest()
 
 
 # Confirm all secrets are attached without printing their values.
 secrets = UserSecretsClient()
+
 for name in (
     "GITHUB_TOKEN",
     "GITHUB_REPO_OWNER",
@@ -58,40 +60,64 @@ for name in (
     "ENGINE_API_TOKEN",
 ):
     value = secrets.get_secret(name)
+
     if value is None or not str(value).strip():
         raise RuntimeError(
             f"Missing Kaggle Secret: {name}. Add it under Add-ons -> Secrets "
             "and enable it for this notebook."
         )
 
-# Reuse the cached small source file only if it matches the pinned SHA256.
-if not SERVER_PATH.is_file() or sha256_file(SERVER_PATH) != SERVER_SHA256:
+
+# Reuse the cached small source file only if it matches the GitHub blob SHA1.
+if (
+    not SERVER_PATH.is_file()
+    or git_blob_sha1(SERVER_PATH) != EXPECTED_SERVER_BLOB_SHA1
+):
     request = urllib.request.Request(
         SERVER_URL,
         headers={"User-Agent": "lc0-kaggle-bootstrap/1.0"},
     )
+
     with urllib.request.urlopen(request, timeout=60) as response, TEMP_PATH.open("wb") as out:
         shutil.copyfileobj(response, out)
+
     TEMP_PATH.replace(SERVER_PATH)
 
-if sha256_file(SERVER_PATH) != SERVER_SHA256:
-    raise RuntimeError("LC0 server source SHA256 mismatch; refusing to execute it.")
+
+actual_blob_sha1 = git_blob_sha1(SERVER_PATH)
+
+if actual_blob_sha1 != EXPECTED_SERVER_BLOB_SHA1:
+    raise RuntimeError(
+        "Server source Git blob SHA1 mismatch. "
+        f"Expected {EXPECTED_SERVER_BLOB_SHA1}, got {actual_blob_sha1}."
+    )
+
 
 # Validate Python syntax before starting any engine process.
 source = SERVER_PATH.read_text(encoding="utf-8")
 compile(source, str(SERVER_PATH), "exec")
 
+
 if importlib.util.find_spec("chess") is None:
     print("Installing python-chess (small Python dependency only)...", flush=True)
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-q", "python-chess==1.999"],
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-q",
+            "python-chess==1.999",
+        ],
         check=True,
     )
 
-print("LC0 server source verified:", SERVER_SHA256)
+
+print("LC0 server source verified:", actual_blob_sha1)
 print("Using attached Kaggle Output cache; no LC0 build or BT4 download.")
 print("Starting one persistent dual-T4 UCI process in this notebook cell.")
 print("Keep this cell running. Interrupt it to request graceful shutdown.\n", flush=True)
+
 
 # Run in-process so KeyboardInterrupt reaches the service cleanup block.
 runpy.run_path(str(SERVER_PATH), run_name="__main__")
