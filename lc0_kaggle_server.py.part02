@@ -1,0 +1,106 @@
+rent update may invalidate the Contents API SHA; refresh it and retry.
+                if attempt == 2 or ("409" not in str(exc) and "422" not in str(exc)):
+                    raise
+                time.sleep(1.0 + attempt)
+        raise RuntimeError("Unable to publish hooker.txt after three attempts.")
+
+
+class Lc0Api:
+    def __init__(self, engine: Any, engine_name: str, api_token: str, gpu_names: list[str]):
+        self.engine = engine
+        self.engine_name = engine_name
+        self.api_token = api_token
+        self.gpu_names = gpu_names
+        self.started_at = datetime.now(timezone.utc).isoformat()
+        self.analysis_lock = threading.Lock()
+
+    def health(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "status": "online",
+            "engine": self.engine_name,
+            "gpus": self.gpu_names,
+            "started_at": self.started_at,
+            "api": "/v1/analyze",
+        }
+
+    def analyze(self, payload: dict[str, Any]) -> dict[str, Any]:
+        import chess
+        import chess.engine
+
+        fen = payload.get("fen")
+        if not isinstance(fen, str) or not fen.strip() or len(fen) > 256:
+            raise ValueError("Provide a valid FEN string in 'fen'.")
+        board = chess.Board(fen.strip())
+        if not board.is_valid():
+            raise ValueError("FEN does not describe a valid standard chess position.")
+        if not any(board.legal_moves):
+            raise ValueError("Position has no legal moves.")
+
+        try:
+            movetime_ms = int(payload.get("movetime_ms", DEFAULT_MOVETIME_MS))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("movetime_ms must be an integer.") from exc
+        if not 100 <= movetime_ms <= MAX_MOVETIME_MS:
+            raise ValueError(f"movetime_ms must be between 100 and {MAX_MOVETIME_MS}.")
+
+        # One LC0 UCI process is shared. Reject overlapping searches rather than
+        # letting stale board positions queue behind one another.
+        if not self.analysis_lock.acquire(blocking=False):
+            raise BlockingIOError("Engine is already analyzing another position; retry shortly.")
+        started = time.perf_counter()
+        try:
+            info = self.engine.analyse(
+                board,
+                chess.engine.Limit(time=movetime_ms / 1000.0),
+                info=chess.engine.INFO_ALL,
+            )
+        finally:
+            self.analysis_lock.release()
+
+        pv = info.get("pv") or []
+        if not pv or pv[0] not in board.legal_moves:
+            raise RuntimeError("LC0 returned no legal best move.")
+
+        pv_uci: list[str] = []
+        pv_san: list[str] = []
+        cursor = board.copy(stack=False)
+        for move in pv[:12]:
+            if move not in cursor.legal_moves:
+                break
+            pv_uci.append(move.uci())
+            pv_san.append(cursor.san(move))
+            cursor.push(move)
+
+        score_result = None
+        score = info.get("score")
+        if score is not None:
+            relative = score.pov(board.turn)
+            score_result = {"cp": relative.score(), "mate": relative.mate()}
+
+        return {
+            "ok": True,
+            "engine": self.engine_name,
+            "fen": board.fen(),
+            "bestmove": pv_uci[0],
+            "bestmove_san": pv_san[0] if pv_san else pv_uci[0],
+            "pv_uci": pv_uci,
+            "pv_san": pv_san,
+            "score": score_result,
+            "depth": info.get("depth"),
+            "seldepth": info.get("seldepth"),
+            "nodes": info.get("nodes"),
+            "nps": info.get("nps"),
+            "elapsed_ms": round((time.perf_counter() - started) * 1000),
+        }
+
+
+def make_handler(api: Lc0Api):
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, fmt: str, *args: Any) -> None:
+            print("[http] " + (fmt % args), flush=True)
+
+        def send_json(self, status: int, payload: dict[str, Any]) -> None:
+            body = json.dumps(payload, separators=(",",
