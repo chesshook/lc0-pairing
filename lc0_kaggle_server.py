@@ -444,10 +444,58 @@ def start_tailscale(auth_key: str) -> dict[str, Any]:
         raise
 
 
+def publish_http_service(state: dict[str, Any]) -> None:
+    """Publish and verify the loopback HTTP API inside the private tailnet."""
+    result = subprocess.run(
+        [
+            str(state["cli"]),
+            f"--socket={state['socket']}",
+            "serve",
+            "--bg",
+            "--yes",
+            f"--http={PORT}",
+            f"http://127.0.0.1:{PORT}",
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()[-2500:]
+        raise RuntimeError("Tailscale Serve could not publish the phone API: " + detail)
+
+    status = subprocess.run(
+        [str(state["cli"]), f"--socket={state['socket']}", "serve", "status"],
+        capture_output=True, text=True, timeout=20,
+    )
+    status_text = (status.stdout + "\n" + status.stderr).strip()
+    if status.returncode != 0:
+        detail = status_text[-1500:]
+        raise RuntimeError("Tailscale Serve status check failed: " + detail)
+    if f"127.0.0.1:{PORT}" not in status_text:
+        raise RuntimeError(
+            "Tailscale Serve status did not confirm the loopback target "
+            f"127.0.0.1:{PORT}; refusing to announce the API as online. "
+            + status_text[-1500:]
+        )
+    print("[tailscale] Private HTTP forwarding verified:", flush=True)
+    print(status_text, flush=True)
+
+
 def stop_tailscale(state: dict[str, Any] | None) -> None:
     if not state:
         return
     daemon = state.get("daemon")
+    try:
+        subprocess.run(
+            [
+                str(state["cli"]),
+                f"--socket={state['socket']}",
+                "serve",
+                "reset",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception as exc:
+        print("[tailscale] Serve reset warning:", repr(exc), flush=True)
     try:
         subprocess.run(
             [
@@ -522,9 +570,9 @@ def main() -> None:
         print("UCI engine ready:", engine.id, "warmup bestmove:", warm_pv[0].uci())
 
         api = Lc0Api(engine, engine_name, engine_token, gpu_names)
-        # Keep the HTTP listener private to this Kaggle runtime. Tailscale's
-        # userspace netstack forwards authenticated tailnet TCP connections
-        # arriving at the node's Tailscale IP to this loopback listener.
+        # Keep the HTTP listener on loopback and configure an explicit
+        # tailnet-only Tailscale Serve route. Verify that Serve reports this
+        # exact local target before printing the phone API URL.
         httpd = ThreadingHTTPServer(("127.0.0.1", PORT), make_handler(api))
         httpd.daemon_threads = True
         threading.Thread(
@@ -535,6 +583,7 @@ def main() -> None:
         ).start()
 
         tailscale = start_tailscale(tailscale_auth_key)
+        publish_http_service(tailscale)
 
         print("\n" + "=" * 65)
         print("LC0 DUAL-T4 SERVICE ONLINE — PRIVATE TAILNET ONLY")
