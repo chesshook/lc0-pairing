@@ -360,7 +360,6 @@ def start_tailscale(auth_key: str) -> dict[str, Any]:
             "--tun=userspace-networking",
             "--state=mem:",
             f"--socket={socket_path}",
-            "--socks5-server=127.0.0.1:1055",
         ],
         stdin=subprocess.DEVNULL,
         stdout=log_handle,
@@ -381,20 +380,24 @@ def start_tailscale(auth_key: str) -> dict[str, Any]:
                 raise TimeoutError("Timed out waiting for the Tailscale daemon socket.")
             time.sleep(0.25)
 
-        command = [
-            str(tailscale_path),
-            f"--socket={socket_path}",
-            "up",
-            f"--auth-key={auth_key}",
-            f"--hostname={TAILSCALE_HOSTNAME}",
-            "--accept-dns=false",
-            "--accept-routes=false",
-        ]
+        # Pass the auth key through the child environment rather than its
+        # argv, where it could briefly appear in process listings.
+        auth_env = os.environ.copy()
+        auth_env["TS_AUTH_KEY"] = auth_key
+        shell_command = (
+            'exec "$1" --socket="$2" up --auth-key="$TS_AUTH_KEY" '
+            '--hostname="$3" --accept-dns=false --accept-routes=false'
+        )
         try:
             connected = subprocess.run(
-                command, capture_output=True, text=True, timeout=120
+                [
+                    "/bin/sh", "-c", shell_command, "tailscale-up",
+                    str(tailscale_path), str(socket_path), TAILSCALE_HOSTNAME,
+                ],
+                env=auth_env, capture_output=True, text=True, timeout=120
             )
         finally:
+            auth_env.pop("TS_AUTH_KEY", None)
             auth_key = ""
 
         if connected.returncode != 0:
