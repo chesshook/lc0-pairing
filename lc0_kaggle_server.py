@@ -132,6 +132,34 @@ def memory_status() -> str:
         return "ram_available_mb=unknown"
 
 
+def read_log_tail(path: Path, max_lines: int = 60) -> str:
+    """Return the last lines of a diagnostic log without failing shutdown."""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        return "\n".join(lines[-max_lines:]) or "(log is empty)"
+    except Exception as exc:
+        return f"(unable to read {path}: {exc})"
+
+
+def gpu_status() -> str:
+    """Compact T4 memory/utilization snapshot for abrupt-shutdown diagnosis."""
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,memory.used,memory.total,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        rows = [row.strip().replace(", ", "/") for row in result.stdout.splitlines() if row.strip()]
+        return "gpu[index/used_MiB/total_MiB/util_%]=" + ";".join(rows)
+    except Exception as exc:
+        return f"gpu_status=unavailable({type(exc).__name__})"
+
 def check_t4x2() -> list[str]:
     result = subprocess.run(
         ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
@@ -649,10 +677,23 @@ def main() -> None:
             flush=True,
         )
         while True:
-            if tailscale["daemon"].poll() is not None:
+            tailscaled_rc = tailscale["daemon"].poll()
+            if tailscaled_rc is not None:
                 raise RuntimeError(
-                    "tailscaled stopped unexpectedly; inspect /kaggle/working/tailscaled.log."
+                    "tailscaled exited unexpectedly with code "
+                    f"{tailscaled_rc}. Last /kaggle/working/tailscaled.log lines:\n"
+                    + read_log_tail(Path("/kaggle/working/tailscaled.log"))
                 )
+
+            # python-chess exposes process termination through a Future[int],
+            # not through SimpleEngine.process.
+            engine_exit = getattr(engine, "returncode", None)
+            if engine_exit is not None and engine_exit.done():
+                try:
+                    engine_rc = engine_exit.result()
+                except Exception as exc:
+                    engine_rc = f"unavailable: {exc}"
+                raise RuntimeError(f"LC0 UCI process exited unexpectedly: returncode={engine_rc}")
 
             now = time.monotonic()
             if now - last_heartbeat >= heartbeat_interval:
@@ -660,8 +701,9 @@ def main() -> None:
                     "[watchdog] ALIVE; "
                     f"uptime={int(now - service_started_at)}s; "
                     f"tailscaled_pid={tailscale['daemon'].pid}; "
-                    f"lc0_health=UCI-ping-every-{engine_ping_interval}s; "
-                    f"{memory_status()}",
+                    f"lc0={engine!r}; "
+                    f"{memory_status()}; "
+                    f"{gpu_status()}",
                     flush=True,
                 )
                 last_heartbeat = now
@@ -697,5 +739,11 @@ if __name__ == "__main__":
         main()
     except Exception as error:
         print("FATAL:", str(error), file=sys.stderr, flush=True)
+        try:
+            log_path = Path("/kaggle/working/tailscaled.log")
+            if log_path.is_file():
+                print("[diagnostics] tailscaled.log tail:\n" + read_log_tail(log_path), flush=True)
+        except Exception:
+            pass
         traceback.print_exc()
         raise
