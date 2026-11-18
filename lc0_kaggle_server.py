@@ -18,7 +18,6 @@ import platform
 import re
 import shutil
 import subprocess
-import sys
 import tarfile
 import threading
 import time
@@ -661,7 +660,7 @@ def main() -> None:
                     "[watchdog] ALIVE; "
                     f"uptime={int(now - service_started_at)}s; "
                     f"tailscaled_pid={tailscale['daemon'].pid}; "
-                    f"lc0_pid={engine.process.pid}; "
+                    f"lc0_health=UCI-ping-every-{engine_ping_interval}s; "
                     f"{memory_status()}",
                     flush=True,
                 )
@@ -699,4 +698,4 @@ if __name__ == "__main__":
     except Exception as error:
         print("FATAL:", str(error), file=sys.stderr, flush=True)
         traceback.print_exc()
-        sys.exit(1)
+        raise
