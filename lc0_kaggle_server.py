@@ -380,25 +380,28 @@ def start_tailscale(auth_key: str) -> dict[str, Any]:
                 raise TimeoutError("Timed out waiting for the Tailscale daemon socket.")
             time.sleep(0.25)
 
-        # Pass the auth key through the child environment rather than its
-        # argv, where it could briefly appear in process listings.
-        auth_env = os.environ.copy()
-        auth_env["TS_AUTH_KEY"] = auth_key
-        shell_command = (
-            'exec "$1" --socket="$2" up --auth-key="$TS_AUTH_KEY" '
-            '--hostname="$3" --accept-dns=false --accept-routes=false'
-        )
+        # Tailscale supports --auth-key=file:<path>. This keeps the key out
+        # of process argv and gives the temporary file owner-only permissions.
+        auth_file = Path("/tmp/lc0-tailscale-authkey")
+        auth_file.unlink(missing_ok=True)
+        auth_file.write_text(auth_key, encoding="utf-8")
+        auth_file.chmod(0o600)
         try:
             connected = subprocess.run(
                 [
-                    "/bin/sh", "-c", shell_command, "tailscale-up",
-                    str(tailscale_path), str(socket_path), TAILSCALE_HOSTNAME,
+                    str(tailscale_path),
+                    f"--socket={socket_path}",
+                    "up",
+                    f"--auth-key=file:{auth_file}",
+                    f"--hostname={TAILSCALE_HOSTNAME}",
+                    "--accept-dns=false",
+                    "--accept-routes=false",
                 ],
-                env=auth_env, capture_output=True, text=True, timeout=120
+                capture_output=True, text=True, timeout=120
             )
         finally:
-            auth_env.pop("TS_AUTH_KEY", None)
             auth_key = ""
+            auth_file.unlink(missing_ok=True)
 
         if connected.returncode != 0:
             detail = (connected.stderr or connected.stdout).strip()[-2500:]
