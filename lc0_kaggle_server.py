@@ -583,7 +583,28 @@ def main() -> None:
         ).start()
 
         tailscale = start_tailscale(tailscale_auth_key)
-        publish_http_service(tailscale)
+        try:
+            publish_http_service(tailscale)
+        except Exception as serve_error:
+            # Userspace networking can also forward inbound tailnet connections
+            # to the same localhost port. Keep the API online if explicit Serve
+            # is unavailable (for example, if Serve prerequisites are disabled).
+            print(
+                "[tailscale] Serve setup unavailable; using userspace "
+                f"same-port forwarding on {PORT}: {serve_error}",
+                flush=True,
+            )
+
+        # Confirm that the HTTP handler itself is responding before advertising
+        # the API URL. This is a local readiness check, not a remote ping test.
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/health", timeout=5) as response:
+                local_health = json.loads(response.read().decode("utf-8"))
+            if not local_health.get("ok"):
+                raise RuntimeError("Local /health endpoint returned an unhealthy response.")
+        except Exception as health_error:
+            raise RuntimeError("Local HTTP API readiness check failed: " + str(health_error)) from health_error
+        print("[http] Local /health readiness check passed.", flush=True)
 
         print("\n" + "=" * 65)
         print("LC0 DUAL-T4 SERVICE ONLINE — PRIVATE TAILNET ONLY")
