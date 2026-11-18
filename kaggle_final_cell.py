@@ -358,7 +358,8 @@ SERVER_SOURCE_B64 = (
     "OgogICAgICAgIG1haW4oKQogICAgZXhjZXB0IEV4Y2VwdGlvbiBhcyBlcnJvcjoKICAgICAgICBwcmludCgiRkFUQUw6Iiwgc3Ry"
     "KGVycm9yKSwgZmlsZT1zeXMuc3RkZXJyLCBmbHVzaD1UcnVlKQogICAgICAgIHRyYWNlYmFjay5wcmludF9leGMoKQogICAgICAg"
     "IHN5cy5leGl0KDEpCg=="
-)EXPECTED_SERVER_BLOB_SHA1 = "afed042db743abd02b1df7c65b7d7ad464db6263"
+)
+EXPECTED_SERVER_BLOB_SHA1 = "afed042db743abd02b1df7c65b7d7ad464db6263"
 SERVER_PATH = Path('/kaggle/working/lc0_kaggle_server.py')
 SERVER_BYTES = base64.b64decode(SERVER_SOURCE_B64)
 blob_header = f'blob {len(SERVER_BYTES)}\0'.encode('ascii')
