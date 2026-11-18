@@ -2,9 +2,8 @@
 """One-time clean-start builder for the Kaggle LC0 dual-T4 cache.
 
 Run this only in the first Kaggle GPU T4x2 notebook. It builds LC0 v0.32.1
-with its native CUDA FP16 backend, downloads the pinned BT4-it332 weights,
-downloads cloudflared, smoke-tests the dual-GPU UCI engine, and writes a
-small reusable folder under /kaggle/working/lc0-dual-t4-cache.
+with its native CUDA FP16 backend, downloads the pinned BT4-it332 weights, smoke-tests the dual-GPU UCI
+engine, and writes a small reusable folder under /kaggle/working/lc0-dual-t4-cache.
 
 After successfully saving this notebook version's Output Files, future server
 notebooks attach that folder as an Input. They do not run this build script.
@@ -34,11 +33,6 @@ EXPECTED_WEIGHT_SHA256 = (
     "e6ada9d6c4a769bfab3aa0848d82caeb"
     "809aa45f83e6c605fc58a31d21bdd618"
 )
-CLOUDFLARED_URL = (
-    "https://github.com/cloudflare/cloudflared/releases/latest/download/"
-    "cloudflared-linux-amd64"
-)
-
 WORK = Path("/kaggle/working")
 SOURCE_ROOT = WORK / "lc0_dual_t4_lab"
 OUTPUT_ROOT = WORK / "lc0-dual-t4-cache"
@@ -121,38 +115,6 @@ def download_verified(url: str, destination: Path, expected_size: int, expected_
             f"received {actual_size} bytes / {actual_sha}."
         )
     temporary.replace(destination)
-
-
-def download_cloudflared(destination: Path) -> str:
-    if destination.is_file():
-        probe = subprocess.run(
-            [str(destination), "--version"],
-            capture_output=True, text=True, timeout=20,
-        )
-        if probe.returncode == 0:
-            version = (probe.stdout or probe.stderr).strip().splitlines()[0]
-            print("Reusing cloudflared:", version)
-            return version
-        destination.unlink()
-
-    temporary = destination.with_suffix(".download")
-    request = urllib.request.Request(
-        CLOUDFLARED_URL,
-        headers={"User-Agent": "lc0-kaggle-cache-builder/1.0"},
-    )
-    print("Downloading cloudflared ...", flush=True)
-    with urllib.request.urlopen(request, timeout=120) as response, temporary.open("wb") as out:
-        shutil.copyfileobj(response, out, length=1024 * 1024)
-    temporary.chmod(0o755)
-    temporary.replace(destination)
-
-    probe = subprocess.run(
-        [str(destination), "--version"],
-        capture_output=True, text=True, timeout=20,
-    )
-    if probe.returncode != 0:
-        raise RuntimeError("cloudflared downloaded but failed to execute: " + probe.stderr[-2000:])
-    return (probe.stdout or probe.stderr).strip().splitlines()[0]
 
 
 def verify_hardware_and_cuda() -> tuple[list[str], str]:
@@ -326,6 +288,8 @@ def main() -> None:
     install_build_dependencies()
 
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    # Remove artifacts from older Cloudflare-based cache builds.
+    (OUTPUT_ROOT / "cloudflared").unlink(missing_ok=True)
     weights = OUTPUT_ROOT / WEIGHTS_NAME
     download_verified(
         WEIGHTS_URL, weights,
@@ -333,9 +297,6 @@ def main() -> None:
     )
 
     binary_source = build_lc0()
-    cloudflared = OUTPUT_ROOT / "cloudflared"
-    cloudflared_version = download_cloudflared(cloudflared)
-
     binary_target = OUTPUT_ROOT / "lc0"
     shutil.copy2(binary_source, binary_target)
     binary_target.chmod(0o755)
@@ -352,9 +313,6 @@ def main() -> None:
         "weights_file": WEIGHTS_NAME,
         "weights_size": weights.stat().st_size,
         "weights_sha256": sha256_file(weights),
-        "cloudflared_file": "cloudflared",
-        "cloudflared_version": cloudflared_version,
-        "cloudflared_sha256": sha256_file(cloudflared),
         "validated_engine": "Lc0 v0.32.1 / CUDA FP16 / DEMUX / T4x2",
         "smoke_test": test_report,
     }
@@ -363,7 +321,7 @@ def main() -> None:
     )
 
     # The source tree and intermediate build files are no longer needed.
-    # Keep only the four runtime artifacts in /kaggle/working for Output Files.
+    # Keep only the three runtime artifacts in /kaggle/working for Output Files.
     shutil.rmtree(SOURCE_ROOT, ignore_errors=True)
 
     print("\n" + "=" * 72)
@@ -374,7 +332,6 @@ def main() -> None:
         print(f"  {item.name:24s} {item.stat().st_size:>12,} bytes")
     print("BT4 SHA256:", manifest["weights_sha256"])
     print("LC0 SHA256:", manifest["lc0_sha256"])
-    print("cloudflared:", cloudflared_version)
     print("Dual-T4 smoke-test positions:", len(test_report["positions"]))
     print("\nNEXT: Save a Kaggle Notebook Version with Save Output enabled.")
     print("Then attach this notebook's Output Files to the separate server notebook.")
