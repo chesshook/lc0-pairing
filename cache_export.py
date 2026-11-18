@@ -12,7 +12,6 @@ import os
 import shutil
 import subprocess
 import sys
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,11 +26,6 @@ EXPECTED_WEIGHT_SHA256 = (
     "e6ada9d6c4a769bfab3aa0848d82caeb"
     "809aa45f83e6c605fc58a31d21bdd618"
 )
-CLOUDFLARED_URL = (
-    "https://github.com/cloudflare/cloudflared/releases/latest/download/"
-    "cloudflared-linux-amd64"
-)
-
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -39,37 +33,6 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def download_cloudflared(destination: Path) -> str:
-    if destination.is_file() and os.access(destination, os.X_OK):
-        probe = subprocess.run(
-            [str(destination), "--version"], capture_output=True,
-            text=True, timeout=20
-        )
-        if probe.returncode == 0:
-            return (probe.stdout or probe.stderr).strip().splitlines()[0]
-
-    temporary = destination.with_suffix(".download")
-    request = urllib.request.Request(
-        CLOUDFLARED_URL,
-        headers={"User-Agent": "lc0-kaggle-ctf-cache/1.0"},
-    )
-    print("Downloading the small Cloudflare tunnel client once for the cache...")
-    with urllib.request.urlopen(request, timeout=120) as response, temporary.open("wb") as out:
-        shutil.copyfileobj(response, out, length=1024 * 1024)
-    temporary.chmod(0o755)
-    temporary.replace(destination)
-
-    probe = subprocess.run(
-        [str(destination), "--version"], capture_output=True,
-        text=True, timeout=20
-    )
-    if probe.returncode != 0:
-        raise RuntimeError(
-            "Downloaded cloudflared did not execute: " + (probe.stderr or probe.stdout)
-        )
-    return (probe.stdout or probe.stderr).strip().splitlines()[0]
 
 
 def main() -> None:
@@ -96,12 +59,11 @@ def main() -> None:
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     lc0_target = OUTPUT_ROOT / "lc0"
     weights_target = OUTPUT_ROOT / "BT4-it332.pb.gz"
-    tunnel_target = OUTPUT_ROOT / "cloudflared"
+    (OUTPUT_ROOT / "cloudflared").unlink(missing_ok=True)
 
     shutil.copy2(lc0_source, lc0_target)
     shutil.copy2(weights_source, weights_target)
     lc0_target.chmod(0o755)
-    cloudflared_version = download_cloudflared(tunnel_target)
 
     lc0_probe = subprocess.run(
         [str(lc0_target), "--help"], capture_output=True,
@@ -126,9 +88,6 @@ def main() -> None:
         "weights_file": "BT4-it332.pb.gz",
         "weights_size": actual_size,
         "weights_sha256": actual_hash,
-        "cloudflared_file": "cloudflared",
-        "cloudflared_version": cloudflared_version,
-        "cloudflared_sha256": sha256(tunnel_target),
         "validated_engine": "Lc0 v0.32.1 / CUDA FP16 / DEMUX / T4x2",
     }
     (OUTPUT_ROOT / "manifest.json").write_text(
@@ -142,7 +101,6 @@ def main() -> None:
         print(f"  {item.name:24s} {item.stat().st_size:>12,} bytes")
     print("BT4 SHA256:", actual_hash)
     print("LC0 SHA256:", manifest["lc0_sha256"])
-    print("cloudflared:", cloudflared_version)
     print("\nNext: save this notebook version, then use its Output files as an Input")
     print("to the separate LC0 server notebook. No build is performed by this script.")
 
