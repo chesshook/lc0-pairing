@@ -110,3 +110,9 @@ The API returns bestmove and bestmove_san, UCI/SAN principal variation, score, d
 - The Kaggle node explicitly starts Tailscale with `--accept-dns=false` and `--accept-routes=false`; it does not accept tailnet DNS or subnet-route configuration. The phone endpoint is announced only by numeric Tailscale IPv4, not MagicDNS.
 - After the ONLINE banner, the foreground cell prints an immediate watchdog heartbeat and then an alive heartbeat every 5 seconds; it checks LC0 with UCI ping every 30 seconds. A missing heartbeat means the Kaggle kernel/session was interrupted or terminated, not that the Python program intentionally completed.
 - Kaggle controls interactive-session lifetime and GPU availability; a notebook cell cannot override platform session limits. Use the interactive editor session for a persistent foreground service and monitor Kaggle's session status.
+
+
+### Additional shutdown diagnostics
+
+- The watchdog checks the Tailscale daemon and LC0 process exit state every second. If either exits, the cell prints the exit code and the tail of `/kaggle/working/tailscaled.log`.
+- Every 5-second heartbeat includes host RAM and per-GPU memory/utilization.
