@@ -629,19 +629,16 @@ def main() -> None:
                 raise RuntimeError(
                     "tailscaled stopped unexpectedly; inspect /kaggle/working/tailscaled.log."
                 )
-            if engine.returncode is not None:
-                raise RuntimeError(
-                    f"LC0 process exited unexpectedly with code {engine.returncode}."
-                )
             now = time.monotonic()
             if now - last_heartbeat >= 30:
                 print(
                     "[watchdog] LC0 dual-T4 service is alive; "
                     f"uptime={int(now - service_started_at)}s; "
                     f"tailscaled_pid={tailscale['daemon'].pid}; "
-                    f"lc0_pid={engine.process.pid}",
+                    "checking LC0 with UCI ping...",
                     flush=True,
                 )
+                engine.ping()
                 last_heartbeat = now
             time.sleep(2)
 
