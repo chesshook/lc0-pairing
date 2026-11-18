@@ -17,7 +17,7 @@ The Kaggle server joins your tailnet as an ephemeral node. Your phone joins the 
 - Removed the GitHub Contents API write, hooker.txt, and all server-side GitHub secrets/source downloads.
 - The Server notebook embeds and verifies the Python service inside its one-cell launcher; it does not fetch server source from GitHub.
 - The Builder exports only lc0, BT4-it332.pb.gz, and manifest.json. Older cache outputs that still contain an unused cloudflared file remain compatible; the new server ignores that file.
-- Tailscale runs in userspace networking mode, so Kaggle does not need a TUN device. Incoming tailnet connections on port 8765 are forwarded to the server's same local port (127.0.0.1:8765).
+- Tailscale runs in userspace networking mode, so Kaggle does not need a TUN device. The server binds its HTTP API to loopback, then configures an explicit tailnet-only Tailscale Serve HTTP forwarder on port 8765 to http://127.0.0.1:8765 and checks `tailscale serve status` before declaring the API online.
 
 ## Stage 1 — build the cache once
 
@@ -49,9 +49,9 @@ Tailscale auth keys register a device without an interactive browser login; ephe
 3. Attach the saved Builder notebook Output containing lc0, BT4-it332.pb.gz, and manifest.json.
 4. Under **Add-ons → Secrets**, enable TS_AUTH_KEY and ENGINE_API_TOKEN.
 5. Paste the complete kaggle_final_cell.py contents into one code cell and run it.
-6. The cell verifies its embedded server source, installs python-chess only if needed, downloads the official Tailscale static Linux binaries, checks the archive against Tailscale's published SHA256, then starts Tailscale in userspace mode and starts LC0.
+6. The cell verifies its embedded server source, installs python-chess only if needed, downloads the official Tailscale static Linux binaries, checks the archive against Tailscale's published SHA256, starts Tailscale in userspace mode and LC0, configures `tailscale serve --bg --yes --http=8765 http://127.0.0.1:8765`, and verifies the forwarding target before printing the Phone base URL.
 7. Wait until the cell prints **LC0 DUAL-T4 SERVICE ONLINE — PRIVATE TAILNET ONLY**. Copy the printed **Phone base URL** and use it in the phone client. It will look like http://100.x.y.z:8765; the actual address is assigned at runtime and is not predictable in advance.
-8. Keep the notebook cell running while using the engine. Interrupt it when finished to stop LC0 and log out the ephemeral Tailscale node.
+8. Keep the notebook cell running while using the engine. Interrupt it when finished; the cell resets its Tailscale Serve configuration, logs out the ephemeral node, and stops LC0.
 
 The Tailscale client version is pinned in lc0_kaggle_server.py to stable v1.104.7. Its static archive is checked against the published .sha256 file before execution.
 
