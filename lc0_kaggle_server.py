@@ -760,20 +760,17 @@ def main() -> None:
 
             now = time.monotonic()
             if now - last_heartbeat >= heartbeat_interval:
-                print(
-                    "[watchdog] ALIVE; "
+                ram_snapshot = memory_status()
+                gpu_snapshot = gpu_status()
+                cgroup_snapshot = cgroup_memory_status()
+                heartbeat = (
                     f"uptime={int(now - service_started_at)}s; "
                     f"tailscaled_pid={tailscale['daemon'].pid}; "
                     f"lc0={engine!r}; "
-                    f"{memory_status()}; "
-                    f"{gpu_status()}; "
-                    f"{cgroup_memory_status()}",
-                    flush=True,
+                    f"{ram_snapshot}; {gpu_snapshot}; {cgroup_snapshot}"
                 )
-                append_diagnostic(
-                    f"uptime={int(now - service_started_at)}s; "
-                    f"{memory_status()}; {gpu_status()}; {cgroup_memory_status()}"
-                )
+                print("[watchdog] ALIVE; " + heartbeat, flush=True)
+                append_diagnostic(heartbeat)
                 last_heartbeat = now
 
             if now - last_engine_ping >= engine_ping_interval:
