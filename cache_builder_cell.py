@@ -16,7 +16,7 @@ import urllib.request
 
 BUILDER_URL = (
     "https://raw.githubusercontent.com/chesshook/lc0-pairing/"
-    "tailscale-direct/bootstrap_cache.py"
+    "main/bootstrap_cache.py"
 )
 
 # Exact GitHub Contents API blob SHA for bootstrap_cache.py.
