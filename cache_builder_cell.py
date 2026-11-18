@@ -16,11 +16,11 @@ import urllib.request
 
 BUILDER_URL = (
     "https://raw.githubusercontent.com/chesshook/lc0-pairing/"
-    "main/bootstrap_cache.py"
+    "tailscale-direct/bootstrap_cache.py"
 )
 
 # Exact GitHub Contents API blob SHA for bootstrap_cache.py.
-EXPECTED_BUILDER_BLOB_SHA1 = "c0ec45cc9600648171e9746fef17606190406159"
+EXPECTED_BUILDER_BLOB_SHA1 = "adf5a8063df685ab0b037e76417b3aff3d44014d"
 
 BUILDER = Path("/kaggle/working/bootstrap_cache.py")
 TEMP = BUILDER.with_suffix(".download")
