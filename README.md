@@ -116,3 +116,9 @@ The API returns bestmove and bestmove_san, UCI/SAN principal variation, score, d
 
 - The watchdog checks the Tailscale daemon and LC0 process exit state every second. If either exits, the cell prints the exit code and the tail of `/kaggle/working/tailscaled.log`.
 - Every 5-second heartbeat includes host RAM and per-GPU memory/utilization.
+
+### Kernel termination diagnostics
+
+- The server appends timestamped heartbeats, cgroup memory usage and OOM-kill counters to `/kaggle/working/lc0-runtime-diagnostics.log`.
+- SIGTERM and SIGHUP are logged and routed through graceful cleanup. SIGKILL or hard VM termination cannot be caught; the last saved heartbeat is the only in-process evidence.
+- Host RAM availability is logged separately from cgroup memory because container limits and OOM counters are more useful when diagnosing kernel kills.
