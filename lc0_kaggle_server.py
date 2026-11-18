@@ -1,32 +1,32 @@
 #!/usr/bin/env python3
 """Restart-safe LC0 dual-T4 HTTP service for a Kaggle Notebook.
 
-- Reads LC0 + BT4 + cloudflared from a mounted Kaggle Notebook Output dataset.
+- Reuses the cached LC0 binary and verified BT4 network from Notebook Output.
 - Starts one persistent LC0 UCI process with the CUDA FP16 DEMUX backend.
-- Exposes a small authenticated JSON API on localhost.
-- Creates a Cloudflare Quick Tunnel and publishes the changing URL to hooker.txt.
+- Exposes an authenticated JSON API on 127.0.0.1 only.
+- Joins the user's tailnet using Tailscale userspace networking.
+- Phone clients connect directly to the private Tailscale IPv4 address.
 - Never downloads weights or compiles LC0 at server startup.
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 import traceback
-import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
-from queue import Queue, Empty
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 EXPECTED_WEIGHT_SIZE = 382_645_315
@@ -40,7 +40,8 @@ MINIBATCH = int(os.environ.get("LC0_MINIBATCH", "256"))
 NNCACHE = int(os.environ.get("LC0_NNCACHE", "1000000"))
 DEFAULT_MOVETIME_MS = int(os.environ.get("LC0_DEFAULT_MOVETIME_MS", "1800"))
 MAX_MOVETIME_MS = int(os.environ.get("LC0_MAX_MOVETIME_MS", "10000"))
-TUNNEL_URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+TAILSCALE_VERSION = os.environ.get("LC0_TAILSCALE_VERSION", "1.104.7")
+TAILSCALE_HOSTNAME = os.environ.get("LC0_TAILSCALE_HOSTNAME", "lc0-dual-t4-kaggle")
 
 
 def sha256_file(path: Path) -> str:
@@ -70,10 +71,9 @@ def get_secret(client: Any, name: str, required: bool = True, default: str = "")
 def find_cache() -> tuple[Path, dict[str, Any]]:
     input_root = Path("/kaggle/input")
     if not input_root.exists():
-        raise RuntimeError("/kaggle/input is missing; attach the LC0 cache notebook output as an Input.")
+        raise RuntimeError("Attach the saved LC0 cache notebook output as a Kaggle Input first.")
 
-    candidates = list(input_root.rglob("manifest.json"))
-    for manifest_path in candidates:
+    for manifest_path in input_root.rglob("manifest.json"):
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             if (
@@ -83,24 +83,21 @@ def find_cache() -> tuple[Path, dict[str, Any]]:
                 root = manifest_path.parent
                 lc0_path = root / manifest.get("lc0_file", "lc0")
                 weights_path = root / manifest.get("weights_file", "BT4-it332.pb.gz")
-                tunnel_path = root / manifest.get("cloudflared_file", "cloudflared")
-                if lc0_path.is_file() and weights_path.is_file() and tunnel_path.is_file():
+                if lc0_path.is_file() and weights_path.is_file():
                     return root, manifest
         except Exception:
             continue
 
     raise RuntimeError(
-        "No matching LC0 cache found in /kaggle/input. Attach the notebook output "
-        "containing lc0, BT4-it332.pb.gz, cloudflared and manifest.json. "
-        "Run bootstrap_cache.py once in the separate Builder notebook, save its Output Files, "
-        "and attach that saved output as an Input to this Server notebook."
+        "No matching LC0 cache found in /kaggle/input. Attach the saved output "
+        "containing lc0, BT4-it332.pb.gz and manifest.json. Existing cache outputs "
+        "that also contain an unused cloudflared file are accepted; it is ignored."
     )
 
 
-def verify_cache(root: Path, manifest: dict[str, Any]) -> tuple[Path, Path, Path]:
+def verify_cache(root: Path, manifest: dict[str, Any]) -> tuple[Path, Path]:
     lc0 = root / manifest.get("lc0_file", "lc0")
     weights = root / manifest.get("weights_file", "BT4-it332.pb.gz")
-    cloudflared = root / manifest.get("cloudflared_file", "cloudflared")
 
     if weights.stat().st_size != EXPECTED_WEIGHT_SIZE:
         raise RuntimeError("Mounted BT4 network has the wrong file size.")
@@ -109,23 +106,15 @@ def verify_cache(root: Path, manifest: dict[str, Any]) -> tuple[Path, Path, Path
     expected_lc0_hash = manifest.get("lc0_sha256")
     if expected_lc0_hash and sha256_file(lc0) != expected_lc0_hash:
         raise RuntimeError("Mounted LC0 executable failed SHA256 verification.")
-    expected_tunnel_hash = manifest.get("cloudflared_sha256")
-    if expected_tunnel_hash and sha256_file(cloudflared) != expected_tunnel_hash:
-        raise RuntimeError("Mounted cloudflared binary failed SHA256 verification.")
 
-    # Notebook Output Files are mounted read-only. Stage only the two executable
-    # tools (normally much smaller than the 383 MB network) into this runtime's
-    # scratch directory so execute bits are guaranteed. The weights stay mounted
-    # read-only and are not copied or downloaded.
+    # Notebook Output Files are read-only. Stage only the small executable;
+    # keep the 383 MB weights mounted read-only and avoid copying them.
     runtime_bin = Path("/kaggle/working/lc0-runtime-bin")
     runtime_bin.mkdir(parents=True, exist_ok=True)
     lc0_runtime = runtime_bin / "lc0"
-    tunnel_runtime = runtime_bin / "cloudflared"
     shutil.copy2(lc0, lc0_runtime)
-    shutil.copy2(cloudflared, tunnel_runtime)
     lc0_runtime.chmod(0o755)
-    tunnel_runtime.chmod(0o755)
-    return lc0_runtime, weights, tunnel_runtime
+    return lc0_runtime, weights
 
 
 def check_t4x2() -> list[str]:
@@ -140,62 +129,6 @@ def check_t4x2() -> list[str]:
             + ". Set Kaggle Settings -> Accelerator -> GPU T4 x2."
         )
     return names
-
-
-class GitHubPointer:
-    """Serially create/update root hooker.txt using the GitHub Contents API."""
-    def __init__(self, token: str, owner: str, repo: str, branch: str = "main"):
-        self.token = token
-        self.owner = owner
-        self.repo = repo
-        self.branch = branch or "main"
-        self.api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/hooker.txt"
-
-    def _request(self, method: str, data: dict[str, Any] | None = None):
-        body = None if data is None else json.dumps(data).encode("utf-8")
-        request = urllib.request.Request(
-            self.api_url + "?ref=" + self.branch if method == "GET" else self.api_url,
-            data=body,
-            method=method,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": "Bearer " + self.token,
-                "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "lc0-kaggle-ctf-service/1.0",
-                "Content-Type": "application/json",
-            },
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=20) as response:
-                raw = response.read()
-                return response.status, json.loads(raw.decode("utf-8")) if raw else {}
-        except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", "replace")[:1500]
-            if exc.code == 404 and method == "GET":
-                return 404, {}
-            raise RuntimeError(f"GitHub API {method} failed ({exc.code}): {error_body}") from exc
-
-    def publish(self, value: str) -> None:
-        content = base64.b64encode((value.strip() + "\n").encode("utf-8")).decode("ascii")
-        for attempt in range(3):
-            status, current = self._request("GET")
-            payload: dict[str, Any] = {
-                "message": "Publish Kaggle LC0 endpoint" if value != "OFFLINE" else "Mark Kaggle LC0 offline",
-                "content": content,
-                "branch": self.branch,
-            }
-            if status == 200 and current.get("sha"):
-                payload["sha"] = current["sha"]
-            try:
-                self._request("PUT", payload)
-                print("GitHub pointer updated:", value if value == "OFFLINE" else "ONLINE (URL stored)", flush=True)
-                return
-            except RuntimeError as exc:
-                # A concurrent update may invalidate the Contents API SHA; refresh it and retry.
-                if attempt == 2 or ("409" not in str(exc) and "422" not in str(exc)):
-                    raise
-                time.sleep(1.0 + attempt)
-        raise RuntimeError("Unable to publish hooker.txt after three attempts.")
 
 
 class Lc0Api:
@@ -351,46 +284,200 @@ def make_handler(api: Lc0Api):
     return Handler
 
 
-def wait_for_tunnel_url(process: subprocess.Popen[str], timeout_s: int = 90) -> str:
-    lines: Queue[str] = Queue()
+def download_tailscale() -> tuple[Path, Path]:
+    """Download and checksum-verify Tailscale's official static Linux binaries."""
+    machine = platform.machine().lower()
+    arch = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(machine)
+    if arch is None:
+        raise RuntimeError(f"Unsupported Kaggle CPU architecture for Tailscale: {machine}")
 
-    def pump() -> None:
-        assert process.stdout is not None
-        for line in process.stdout:
-            lines.put(line.rstrip())
+    if not re.fullmatch(r"[0-9]+(?:[.][0-9]+){2}", TAILSCALE_VERSION):
+        raise RuntimeError("LC0_TAILSCALE_VERSION must be a stable x.y.z version.")
 
-    threading.Thread(target=pump, daemon=True, name="cloudflared-log-pump").start()
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise RuntimeError(f"cloudflared exited early (code {process.returncode}).")
+    runtime_dir = Path("/kaggle/working/tailscale-runtime")
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = runtime_dir / f"tailscale_{TAILSCALE_VERSION}_{arch}.tgz"
+    url = f"https://pkgs.tailscale.com/stable/tailscale_{TAILSCALE_VERSION}_{arch}.tgz"
+
+    request = urllib.request.Request(url + ".sha256", headers={"User-Agent": "lc0-kaggle-tailscale/1.0"})
+    with urllib.request.urlopen(request, timeout=45) as response:
+        checksum_text = response.read(4096).decode("ascii", "strict")
+    match = re.search(r"([0-9a-fA-F]{64})", checksum_text)
+    if not match:
+        raise RuntimeError("Tailscale package server returned an invalid SHA256 file.")
+    expected_sha = match.group(1).lower()
+
+    if not archive_path.is_file() or sha256_file(archive_path) != expected_sha:
+        temporary = archive_path.with_suffix(".download")
+        temporary.unlink(missing_ok=True)
+        request = urllib.request.Request(url, headers={"User-Agent": "lc0-kaggle-tailscale/1.0"})
+        print(f"Downloading verified Tailscale {TAILSCALE_VERSION} static binaries...", flush=True)
+        with urllib.request.urlopen(request, timeout=120) as response, temporary.open("wb") as output:
+            shutil.copyfileobj(response, output, length=1024 * 1024)
+        if sha256_file(temporary) != expected_sha:
+            temporary.unlink(missing_ok=True)
+            raise RuntimeError("Tailscale archive SHA256 verification failed.")
+        temporary.replace(archive_path)
+
+    binaries: dict[str, Path] = {}
+    with tarfile.open(archive_path, "r:gz") as archive:
+        for binary_name in ("tailscale", "tailscaled"):
+            matches = [
+                item for item in archive.getmembers()
+                if PurePosixPath(item.name).name == binary_name and item.isfile()
+            ]
+            if len(matches) != 1:
+                raise RuntimeError(f"Expected exactly one {binary_name} binary in the Tailscale archive.")
+            source = archive.extractfile(matches[0])
+            if source is None:
+                raise RuntimeError(f"Unable to read {binary_name} from the Tailscale archive.")
+            destination = runtime_dir / binary_name
+            with source, destination.open("wb") as output:
+                shutil.copyfileobj(source, output)
+            destination.chmod(0o755)
+            binaries[binary_name] = destination
+
+    version_result = subprocess.run(
+        [str(binaries["tailscale"]), "version"],
+        capture_output=True, text=True, timeout=20
+    )
+    if version_result.returncode != 0 or TAILSCALE_VERSION not in (version_result.stdout + version_result.stderr):
+        raise RuntimeError("Downloaded Tailscale CLI failed its version check.")
+    return binaries["tailscaled"], binaries["tailscale"]
+
+
+def start_tailscale(auth_key: str) -> dict[str, Any]:
+    """Start Tailscale without /dev/net/tun and attach this Kaggle runtime to the tailnet."""
+    tailscaled_path, tailscale_path = download_tailscale()
+    socket_path = Path("/tmp/lc0-tailscaled.sock")
+    socket_path.unlink(missing_ok=True)
+    log_path = Path("/kaggle/working/tailscaled.log")
+    log_handle = log_path.open("w", encoding="utf-8")
+
+    daemon = subprocess.Popen(
+        [
+            str(tailscaled_path),
+            "--tun=userspace-networking",
+            "--state=mem:",
+            f"--socket={socket_path}",
+            "--socks5-server=127.0.0.1:1055",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        text=True,
+    )
+
+    try:
+        deadline = time.monotonic() + 35
+        while not socket_path.exists():
+            if daemon.poll() is not None:
+                raise RuntimeError(
+                    f"tailscaled exited during startup (code {daemon.returncode}); "
+                    f"see {log_path} for its log."
+                )
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Timed out waiting for the Tailscale daemon socket.")
+            time.sleep(0.25)
+
+        command = [
+            str(tailscale_path),
+            f"--socket={socket_path}",
+            "up",
+            f"--auth-key={auth_key}",
+            f"--hostname={TAILSCALE_HOSTNAME}",
+            "--accept-dns=false",
+            "--accept-routes=false",
+        ]
         try:
-            line = lines.get(timeout=0.5)
-        except Empty:
-            continue
-        print("[cloudflared]", line, flush=True)
-        match = TUNNEL_URL_RE.search(line)
-        if match:
-            return match.group(0)
-    raise TimeoutError("Timed out waiting for a trycloudflare.com URL.")
+            connected = subprocess.run(
+                command, capture_output=True, text=True, timeout=120
+            )
+        finally:
+            auth_key = ""
+
+        if connected.returncode != 0:
+            detail = (connected.stderr or connected.stdout).strip()[-2500:]
+            raise RuntimeError("Tailscale authentication failed: " + detail)
+
+        status = subprocess.run(
+            [str(tailscale_path), f"--socket={socket_path}", "status", "--json"],
+            capture_output=True, text=True, check=True, timeout=30,
+        )
+        payload = json.loads(status.stdout)
+        self_info = payload.get("Self") or {}
+        addresses = self_info.get("TailscaleIPs") or []
+        tailscale_ip = next((ip for ip in addresses if "." in ip), "")
+        if not tailscale_ip:
+            raise RuntimeError("Tailscale connected but did not report a Tailscale IPv4 address.")
+        dns_name = str(self_info.get("DNSName") or "").rstrip(".")
+
+        print("[tailscale] private tailnet connection established.", flush=True)
+        print("[tailscale] Kaggle IPv4:", tailscale_ip, flush=True)
+        if dns_name:
+            print("[tailscale] MagicDNS:", dns_name, flush=True)
+        print(f"[tailscale] Phone API base URL: http://{tailscale_ip}:{PORT}", flush=True)
+        return {
+            "daemon": daemon,
+            "cli": tailscale_path,
+            "socket": socket_path,
+            "log": log_handle,
+            "ip": tailscale_ip,
+            "dns_name": dns_name,
+        }
+    except Exception:
+        if daemon.poll() is None:
+            daemon.terminate()
+            try:
+                daemon.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                daemon.kill()
+                daemon.wait(timeout=5)
+        log_handle.close()
+        raise
+
+
+def stop_tailscale(state: dict[str, Any] | None) -> None:
+    if not state:
+        return
+    daemon = state.get("daemon")
+    try:
+        subprocess.run(
+            [
+                str(state["cli"]),
+                f"--socket={state['socket']}",
+                "logout",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception as exc:
+        print("[tailscale] Logout warning:", repr(exc), flush=True)
+
+    if daemon is not None and daemon.poll() is None:
+        daemon.terminate()
+        try:
+            daemon.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            daemon.kill()
+            daemon.wait(timeout=5)
+    log_handle = state.get("log")
+    if log_handle:
+        log_handle.close()
 
 
 def main() -> None:
-    # Kaggle Secrets are deliberately read at runtime, never stored in repo files.
+    # Secrets are kept in Kaggle Secrets; only the ephemeral node key and API
+    # bearer token are needed. No GitHub or Cloudflare credentials are used.
     try:
         from kaggle_secrets import UserSecretsClient
     except ImportError as exc:
         raise RuntimeError("This service must run inside Kaggle Notebooks.") from exc
 
     secrets_client = UserSecretsClient()
-    github_token = get_secret(secrets_client, "GITHUB_TOKEN")
-    github_owner = get_secret(secrets_client, "GITHUB_REPO_OWNER")
-    github_repo = get_secret(secrets_client, "GITHUB_REPO_NAME")
+    tailscale_auth_key = get_secret(secrets_client, "TS_AUTH_KEY")
     engine_token = get_secret(secrets_client, "ENGINE_API_TOKEN")
-    github_branch = get_secret(secrets_client, "GITHUB_BRANCH", required=False, default="main")
 
-    # python-chess is the only engine-control dependency. It was already imported
-    # by the user's successful validation notebook; fail clearly if environment differs.
     try:
         import chess
         import chess.engine
@@ -398,7 +485,7 @@ def main() -> None:
         raise RuntimeError("python-chess is missing. Run: pip install python-chess==1.999") from exc
 
     cache_root, manifest = find_cache()
-    lc0_path, weights_path, cloudflared_path = verify_cache(cache_root, manifest)
+    lc0_path, weights_path = verify_cache(cache_root, manifest)
     gpu_names = check_t4x2()
     print("Cache:", cache_root)
     print("LC0:", manifest.get("lc0_help_first_line", "cached binary"))
@@ -416,10 +503,8 @@ def main() -> None:
     ]
     print("Starting one persistent dual-T4 UCI process...")
     engine = chess.engine.SimpleEngine.popen_uci(command, timeout=180)
-    tunnel = None
+    tailscale = None
     httpd = None
-    pointer = GitHubPointer(github_token, github_owner, github_repo, github_branch)
-    published = False
 
     try:
         engine.ping()
@@ -431,6 +516,9 @@ def main() -> None:
         print("UCI engine ready:", engine.id, "warmup bestmove:", warm_pv[0].uci())
 
         api = Lc0Api(engine, engine_name, engine_token, gpu_names)
+        # Keep the HTTP listener private to this Kaggle runtime. Tailscale's
+        # userspace netstack forwards authenticated tailnet TCP connections
+        # arriving at the node's Tailscale IP to this loopback listener.
         httpd = ThreadingHTTPServer(("127.0.0.1", PORT), make_handler(api))
         httpd.daemon_threads = True
         threading.Thread(
@@ -440,53 +528,33 @@ def main() -> None:
             name="lc0-http-server",
         ).start()
 
-        tunnel = subprocess.Popen(
-            [str(cloudflared_path), "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{PORT}"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        public_url = wait_for_tunnel_url(tunnel)
-        pointer.publish(public_url)
-        published = True
+        tailscale = start_tailscale(tailscale_auth_key)
 
-        raw_pointer = (
-            f"https://raw.githubusercontent.com/{github_owner}/{github_repo}/"
-            f"{github_branch}/hooker.txt"
-        )
         print("\n" + "=" * 65)
-        print("LC0 DUAL-T4 SERVICE ONLINE")
-        print("Public base URL:", public_url)
-        print("Health URL:", public_url + "/health")
-        print("Analysis route:", public_url + "/v1/analyze")
-        print("GitHub discovery file:", raw_pointer)
-        print("API token: loaded from Kaggle Secrets; not displayed")
+        print("LC0 DUAL-T4 SERVICE ONLINE — PRIVATE TAILNET ONLY")
+        print(f"Phone base URL: http://{tailscale['ip']}:{PORT}")
+        print(f"Health URL: http://{tailscale['ip']}:{PORT}/health")
+        print(f"Analysis route: http://{tailscale['ip']}:{PORT}/v1/analyze")
+        if tailscale.get("dns_name"):
+            print(f"MagicDNS base URL: http://{tailscale['dns_name']}:{PORT}")
+        print("No public tunnel, public discovery pointer, or GitHub API is used.")
         print("Keep this notebook cell running. Interrupt it for graceful shutdown.")
         print("=" * 65, flush=True)
 
         while True:
-            if tunnel.poll() is not None:
-                raise RuntimeError(f"cloudflared stopped (code {tunnel.returncode}).")
+            if tailscale["daemon"].poll() is not None:
+                raise RuntimeError(
+                    "tailscaled stopped unexpectedly; inspect /kaggle/working/tailscaled.log."
+                )
             time.sleep(2)
 
     except KeyboardInterrupt:
         print("Shutdown requested by user.", flush=True)
     finally:
-        if published:
-            try:
-                pointer.publish("OFFLINE")
-            except Exception as exc:
-                print("Could not publish OFFLINE marker:", repr(exc), flush=True)
-        if tunnel is not None and tunnel.poll() is None:
-            tunnel.terminate()
-            try:
-                tunnel.wait(timeout=8)
-            except subprocess.TimeoutExpired:
-                tunnel.kill()
         if httpd is not None:
             httpd.shutdown()
             httpd.server_close()
+        stop_tailscale(tailscale)
         try:
             engine.quit()
         except Exception:
