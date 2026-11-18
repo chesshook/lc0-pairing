@@ -17,6 +17,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import tarfile
 import threading
@@ -41,6 +42,60 @@ DEFAULT_MOVETIME_MS = int(os.environ.get("LC0_DEFAULT_MOVETIME_MS", "1800"))
 MAX_MOVETIME_MS = int(os.environ.get("LC0_MAX_MOVETIME_MS", "10000"))
 TAILSCALE_VERSION = os.environ.get("LC0_TAILSCALE_VERSION", "1.104.7")
 TAILSCALE_HOSTNAME = os.environ.get("LC0_TAILSCALE_HOSTNAME", "lc0-dual-t4-kaggle")
+
+
+DIAGNOSTIC_LOG_PATH = Path("/kaggle/working/lc0-runtime-diagnostics.log")
+
+
+def append_diagnostic(message: str) -> None:
+    """Write a timestamped diagnostic line to notebook output and working disk."""
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    line = f"{stamp} {message}"
+    print("[diagnostic] " + line, flush=True)
+    try:
+        with DIAGNOSTIC_LOG_PATH.open("a", encoding="utf-8") as stream:
+            stream.write(line + "\n")
+            stream.flush()
+    except Exception as exc:
+        print("[diagnostic] Could not append diagnostic log:", repr(exc), flush=True)
+
+
+def cgroup_memory_status() -> str:
+    """Read container memory and OOM counters; host MemAvailable alone is insufficient."""
+    try:
+        root = Path("/sys/fs/cgroup")
+        current = (root / "memory.current").read_text().strip()
+        maximum = (root / "memory.max").read_text().strip()
+        events_text = (root / "memory.events").read_text().splitlines()
+        events = {}
+        for row in events_text:
+            key, _, value = row.partition(" ")
+            events[key] = value
+        current_mb = int(current) // (1024 * 1024)
+        max_mb = "max" if maximum == "max" else str(int(maximum) // (1024 * 1024))
+        return (
+            f"cgroup_memory_mb={current_mb}/{max_mb}; "
+            f"cgroup_oom={events.get('oom', '?')}; "
+            f"cgroup_oom_kill={events.get('oom_kill', '?')}"
+        )
+    except Exception:
+        return "cgroup_memory=unavailable"
+
+
+def install_termination_signal_handlers() -> None:
+    """Make normal supervisor termination signals visible before cleanup."""
+    def handle_termination(signum: int, frame: Any) -> None:
+        try:
+            signal_name = signal.Signals(signum).name
+        except Exception:
+            signal_name = str(signum)
+        append_diagnostic(
+            f"received signal {signal_name}; requesting graceful shutdown"
+        )
+        raise KeyboardInterrupt(f"received {signal_name}")
+
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, handle_termination)
 
 
 def sha256_file(path: Path) -> str:
@@ -572,6 +627,9 @@ def main() -> None:
     except ImportError as exc:
         raise RuntimeError("This service must run inside Kaggle Notebooks.") from exc
 
+    install_termination_signal_handlers()
+    DIAGNOSTIC_LOG_PATH.unlink(missing_ok=True)
+    append_diagnostic('server process started; termination signal handlers installed')
     secrets_client = UserSecretsClient()
     tailscale_auth_key = get_secret(secrets_client, "TS_AUTH_KEY")
     engine_token = get_secret(secrets_client, "ENGINE_API_TOKEN")
@@ -679,6 +737,10 @@ def main() -> None:
         while True:
             tailscaled_rc = tailscale["daemon"].poll()
             if tailscaled_rc is not None:
+                append_diagnostic(
+                    f"tailscaled exited unexpectedly: returncode={tailscaled_rc}; "
+                    + read_log_tail(Path("/kaggle/working/tailscaled.log"), 20)
+                )
                 raise RuntimeError(
                     "tailscaled exited unexpectedly with code "
                     f"{tailscaled_rc}. Last /kaggle/working/tailscaled.log lines:\n"
@@ -693,6 +755,7 @@ def main() -> None:
                     engine_rc = engine_exit.result()
                 except Exception as exc:
                     engine_rc = f"unavailable: {exc}"
+                append_diagnostic(f"LC0 UCI process exited unexpectedly: returncode={engine_rc}")
                 raise RuntimeError(f"LC0 UCI process exited unexpectedly: returncode={engine_rc}")
 
             now = time.monotonic()
@@ -703,8 +766,13 @@ def main() -> None:
                     f"tailscaled_pid={tailscale['daemon'].pid}; "
                     f"lc0={engine!r}; "
                     f"{memory_status()}; "
-                    f"{gpu_status()}",
+                    f"{gpu_status()}; "
+                    f"{cgroup_memory_status()}",
                     flush=True,
+                )
+                append_diagnostic(
+                    f"uptime={int(now - service_started_at)}s; "
+                    f"{memory_status()}; {gpu_status()}; {cgroup_memory_status()}"
                 )
                 last_heartbeat = now
 
@@ -720,8 +788,8 @@ def main() -> None:
 
             time.sleep(1)
 
-    except KeyboardInterrupt:
-        print("Shutdown requested by user.", flush=True)
+    except KeyboardInterrupt as stop_reason:
+        append_diagnostic(f"graceful stop entered: {stop_reason or 'interrupt'}")
     finally:
         if httpd is not None:
             httpd.shutdown()
@@ -731,7 +799,7 @@ def main() -> None:
             engine.quit()
         except Exception:
             pass
-        print("LC0 service stopped.", flush=True)
+        append_diagnostic("LC0 service cleanup completed")
 
 
 if __name__ == "__main__":
