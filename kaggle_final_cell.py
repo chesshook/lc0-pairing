@@ -338,7 +338,7 @@ SERVER_SOURCE_B64 = (
 EXPECTED_SERVER_BLOB_SHA1 = "7a59942d964513e0b1fa27b3094845b4e4fd02e3"
 SERVER_PATH = Path('/kaggle/working/lc0_kaggle_server.py')
 SERVER_BYTES = base64.b64decode(SERVER_SOURCE_B64)
-blob_header = f'blob {len(SERVER_BYTES)}\\0'.encode('ascii')
+blob_header = f'blob {len(SERVER_BYTES)}\0'.encode('ascii')
 actual_blob_sha1 = hashlib.sha1(blob_header + SERVER_BYTES).hexdigest()
 if actual_blob_sha1 != EXPECTED_SERVER_BLOB_SHA1:
     raise RuntimeError(
