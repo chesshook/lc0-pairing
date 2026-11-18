@@ -606,6 +606,7 @@ def main() -> None:
             raise RuntimeError("Local HTTP API readiness check failed: " + str(health_error)) from health_error
         print("[http] Local /health readiness check passed.", flush=True)
 
+        service_started_at = time.monotonic()
         print("\n" + "=" * 65)
         print("LC0 DUAL-T4 SERVICE ONLINE — PRIVATE TAILNET ONLY")
         print(f"Phone base URL: http://{tailscale['ip']}:{PORT}")
@@ -617,11 +618,31 @@ def main() -> None:
         print("Keep this notebook cell running. Interrupt it for graceful shutdown.")
         print("=" * 65, flush=True)
 
+        print(
+            "[watchdog] Service heartbeat enabled (30s). "
+            "Tailscale DNS acceptance is disabled on this Kaggle node.",
+            flush=True,
+        )
+        last_heartbeat = time.monotonic()
         while True:
             if tailscale["daemon"].poll() is not None:
                 raise RuntimeError(
                     "tailscaled stopped unexpectedly; inspect /kaggle/working/tailscaled.log."
                 )
+            if engine.returncode is not None:
+                raise RuntimeError(
+                    f"LC0 process exited unexpectedly with code {engine.returncode}."
+                )
+            now = time.monotonic()
+            if now - last_heartbeat >= 30:
+                print(
+                    "[watchdog] LC0 dual-T4 service is alive; "
+                    f"uptime={int(now - service_started_at)}s; "
+                    f"tailscaled_pid={tailscale['daemon'].pid}; "
+                    f"lc0_pid={engine.process.pid}",
+                    flush=True,
+                )
+                last_heartbeat = now
             time.sleep(2)
 
     except KeyboardInterrupt:
