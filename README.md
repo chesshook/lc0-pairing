@@ -103,3 +103,10 @@ If your tailnet ACL/grants are restrictive, allow the phone device/user to conne
 ## API response
 
 The API returns bestmove and bestmove_san, UCI/SAN principal variation, score, depth, seldepth, nodes, NPS and elapsed time. Invalid FEN or time bounds return HTTP 400, missing/incorrect bearer tokens return HTTP 401, overlapping searches return HTTP 429, and engine faults return HTTP 503. Arbitrary UCI commands and shell execution are not exposed.
+
+
+### Long-running Kaggle session notes
+
+- The Kaggle node explicitly starts Tailscale with `--accept-dns=false` and `--accept-routes=false`; it does not accept tailnet DNS or subnet-route configuration.
+- After the ONLINE banner, the foreground cell remains in its watchdog loop and prints an alive heartbeat every 30 seconds. A missing heartbeat means the Kaggle kernel/session was interrupted or terminated, not that the Python program intentionally completed.
+- Kaggle controls interactive-session lifetime and GPU availability; a notebook cell cannot override platform session limits. Use the interactive editor session for a persistent foreground service and monitor Kaggle's session status.
