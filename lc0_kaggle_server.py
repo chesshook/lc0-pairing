@@ -35,9 +35,9 @@ EXPECTED_WEIGHT_SHA256 = (
     "809aa45f83e6c605fc58a31d21bdd618"
 )
 PORT = int(os.environ.get("LC0_HTTP_PORT", "8765"))
-THREADS = int(os.environ.get("LC0_THREADS", "4"))
-MINIBATCH = int(os.environ.get("LC0_MINIBATCH", "256"))
-NNCACHE = int(os.environ.get("LC0_NNCACHE", "1000000"))
+THREADS = int(os.environ.get("LC0_THREADS", "2"))
+MINIBATCH = int(os.environ.get("LC0_MINIBATCH", "128"))
+NNCACHE = int(os.environ.get("LC0_NNCACHE", "250000"))
 DEFAULT_MOVETIME_MS = int(os.environ.get("LC0_DEFAULT_MOVETIME_MS", "1800"))
 MAX_MOVETIME_MS = int(os.environ.get("LC0_MAX_MOVETIME_MS", "10000"))
 TAILSCALE_VERSION = os.environ.get("LC0_TAILSCALE_VERSION", "1.104.7")
@@ -115,6 +115,22 @@ def verify_cache(root: Path, manifest: dict[str, Any]) -> tuple[Path, Path]:
     shutil.copy2(lc0, lc0_runtime)
     lc0_runtime.chmod(0o755)
     return lc0_runtime, weights
+
+
+def memory_status() -> str:
+    """Return host RAM availability without importing an extra dependency."""
+    try:
+        values: dict[str, int] = {}
+        with Path("/proc/meminfo").open("r", encoding="ascii") as stream:
+            for line in stream:
+                key, _, rest = line.partition(":")
+                if key in {"MemTotal", "MemAvailable"}:
+                    values[key] = int(rest.strip().split()[0])
+        total_mb = values["MemTotal"] // 1024
+        available_mb = values["MemAvailable"] // 1024
+        return f"ram_available_mb={available_mb}/{total_mb}"
+    except Exception:
+        return "ram_available_mb=unknown"
 
 
 def check_t4x2() -> list[str]:
@@ -421,9 +437,7 @@ def start_tailscale(auth_key: str) -> dict[str, Any]:
 
         print("[tailscale] private tailnet connection established.", flush=True)
         print("[tailscale] Kaggle IPv4:", tailscale_ip, flush=True)
-        if dns_name:
-            print("[tailscale] MagicDNS:", dns_name, flush=True)
-        print(f"[tailscale] Phone API base URL: http://{tailscale_ip}:{PORT}", flush=True)
+        print(f"[tailscale] Phone API base URL (numeric IPv4): http://{tailscale_ip}:{PORT}", flush=True)
         return {
             "daemon": daemon,
             "cli": tailscale_path,
@@ -476,8 +490,11 @@ def publish_http_service(state: dict[str, Any]) -> None:
             f"127.0.0.1:{PORT}; refusing to announce the API as online. "
             + status_text[-1500:]
         )
-    print("[tailscale] Private HTTP forwarding verified:", flush=True)
-    print(status_text, flush=True)
+    print(
+        "[tailscale] Private HTTP forwarding verified on the tailnet; "
+        "DNS acceptance remains disabled.",
+        flush=True,
+    )
 
 
 def stop_tailscale(state: dict[str, Any] | None) -> None:
@@ -545,6 +562,12 @@ def main() -> None:
     print("LC0:", manifest.get("lc0_help_first_line", "cached binary"))
     print("BT4 verified:", weights_path.stat().st_size, "bytes")
     print("GPUs:", gpu_names)
+    print(
+        f"LC0 conservative profile: threads={THREADS}, "
+        f"minibatch={MINIBATCH}, nncache={NNCACHE}",
+        flush=True,
+    )
+    print("[resources] Before engine startup:", memory_status(), flush=True)
 
     command = [
         str(lc0_path),
@@ -612,35 +635,49 @@ def main() -> None:
         print(f"Phone base URL: http://{tailscale['ip']}:{PORT}")
         print(f"Health URL: http://{tailscale['ip']}:{PORT}/health")
         print(f"Analysis route: http://{tailscale['ip']}:{PORT}/v1/analyze")
-        if tailscale.get("dns_name"):
-            print(f"MagicDNS base URL: http://{tailscale['dns_name']}:{PORT}")
         print("No public tunnel, public discovery pointer, or GitHub API is used.")
         print("Keep this notebook cell running. Interrupt it for graceful shutdown.")
         print("=" * 65, flush=True)
 
+        heartbeat_interval = 5
+        engine_ping_interval = 30
+        last_heartbeat = time.monotonic() - heartbeat_interval
+        last_engine_ping = time.monotonic()
         print(
-            "[watchdog] Service heartbeat enabled (30s). "
-            "Tailscale DNS acceptance is disabled on this Kaggle node.",
+            "[watchdog] Entering persistent loop; first heartbeat is immediate, "
+            "then every 5s. LC0 UCI ping every 30s. "
+            "Tailscale DNS and route acceptance are disabled.",
             flush=True,
         )
-        last_heartbeat = time.monotonic()
         while True:
             if tailscale["daemon"].poll() is not None:
                 raise RuntimeError(
                     "tailscaled stopped unexpectedly; inspect /kaggle/working/tailscaled.log."
                 )
+
             now = time.monotonic()
-            if now - last_heartbeat >= 30:
+            if now - last_heartbeat >= heartbeat_interval:
                 print(
-                    "[watchdog] LC0 dual-T4 service is alive; "
+                    "[watchdog] ALIVE; "
                     f"uptime={int(now - service_started_at)}s; "
                     f"tailscaled_pid={tailscale['daemon'].pid}; "
-                    "checking LC0 with UCI ping...",
+                    f"lc0_pid={engine.process.pid}; "
+                    f"{memory_status()}",
                     flush=True,
                 )
-                engine.ping()
                 last_heartbeat = now
-            time.sleep(2)
+
+            if now - last_engine_ping >= engine_ping_interval:
+                print("[watchdog] Checking LC0 with UCI ping...", flush=True)
+                try:
+                    engine.ping()
+                except Exception as ping_error:
+                    raise RuntimeError(
+                        "LC0 UCI health check failed; the engine process may have exited."
+                    ) from ping_error
+                last_engine_ping = now
+
+            time.sleep(1)
 
     except KeyboardInterrupt:
         print("Shutdown requested by user.", flush=True)
